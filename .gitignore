@@ -1,3 +1,7 @@
 train2017
 annotations
 coco_embs
+.env
+pycache
+__pycache__
+.vscode
