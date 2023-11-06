@@ -1,13 +1,72 @@
 import os
-from typing import List, Tuple
+import argparse
+from collections import namedtuple
+from typing import List, Tuple, Any, Dict
 
 
+import yaml
 import torch
 import numpy as np
 from pycocotools.coco import COCO
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel, LlamaForCausalLM
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def load_config(file_path: str) -> namedtuple:
+    """Loads a YAML configuration file and returns a named tuple.
+
+    Args:
+        file_path (str): Path to the YAML configuration file.
+
+    Raises:
+        ValueError: In case the YAML file is invalid or empty.
+        ValueError: In case there is an error reading or processing the YAML file.
+
+    Returns:
+        namedtuple: Named tuple containing the configuration parameters.
+    """
+    try:
+        with open(file_path, 'r') as file:
+            data = yaml.load(file, Loader=yaml.FullLoader)  # Load the YAML data
+            if data is None or not isinstance(data, dict):
+                raise ValueError("Invalid YAML file content. It should be a dictionary.")
+
+            # Define a named tuple with keys from the dictionary
+            Config = namedtuple('Config', data.keys())
+
+            # Create an instance of the named tuple with values from the dictionary
+            instance = Config(**data)
+
+            return instance
+    except Exception as e:
+        raise ValueError(f"Error reading or processing YAML file: {str(e)}")
+
+def update_named_tuple_from_args(named_tuple: namedtuple, args: argparse.Namespace) -> namedtuple:
+    """
+    Update a named tuple with values from argparse arguments, if arguments are not None.
+
+    Args:
+        named_tuple (namedtuple): The named tuple to update.
+        args (argparse.Namespace): The argparse arguments.
+
+    Returns:
+        namedtuple: The updated named tuple.
+    """
+    updated_values = {}
+    Config = namedtuple('Config', named_tuple._fields)
+    for key in named_tuple._fields:
+        arg_value = getattr(args, key)
+        if arg_value is not None:
+            updated_values[key] = arg_value
+        else:
+            updated_values[key] = getattr(named_tuple, key)
+    
+    updated_named_tuple = Config(**updated_values)
+    return updated_named_tuple
 
 def collate_fn(batch):
     captions, img_ids, clip_embs, clip_pos = [], [], [], []
@@ -32,7 +91,7 @@ def load_embedding_file(embedding_file: str) -> torch.FloatTensor:
         torch.FloatTensor: Tensor containing the CLIP embeddings.
     """
     coco_images = np.load(embedding_file)
-    return torch.from_numpy(coco_images)
+    return torch.from_numpy(coco_images).float()
 
 class COCODataset(Dataset):
     """COCO Dataset class.
@@ -77,14 +136,14 @@ class COCODataset(Dataset):
     def __getitem__(self, idx) -> Tuple[str, int, torch.FloatTensor, int]:
         return self.coco_data[idx]
 
-
 def train_lm(
     model: AutoModelForCausalLM, 
     tokenizer: AutoTokenizer, 
     caps: List[str], 
     embs: torch.FloatTensor, 
     clip_pos: List[int],
-    device: str
+    device: str,
+    use_amp: bool=True
 ) -> torch.FloatTensor:
     #TODO: Optimize training
     
@@ -100,91 +159,127 @@ def train_lm(
     targets_ids = targets['input_ids'].to(device)
     targets_mask = targets['attention_mask'].to(device)
 
-    #TODO This only works for GPT-2 
-    token_embs = model.transformer.wte(targets_ids)
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        if isinstance(model, GPT2LMHeadModel):
+            token_embs = model.transformer.wte(targets_ids)
+        elif isinstance(model, LlamaForCausalLM):
+            token_embs = model.model.embed_tokens(targets_ids)
+        else:
+            raise ValueError(f"Expected model to be of type GPT2LMHeadModel or LlamaForCausalLM but got {type(model)}")
 
-    # Create placeholder tensors to concatenate CLIP embeddings in the case of CLIP->caption
-    input_clip_embs = torch.zeros((token_embs.size(0), token_embs.size(1)+1, token_embs.size(2)), device=device)
-    target_clip_mask = torch.zeros((targets_mask.size(0), targets_mask.size(1)+1), dtype=torch.int64, device=device)
-    target_clip_ids = torch.zeros((targets_ids.size(0), targets_ids.size(1)+1), dtype=torch.int64, device=device)
+        # Create placeholder tensors to concatenate CLIP embeddings in the case of CLIP->caption
+        input_clip_embs = torch.zeros((token_embs.size(0), token_embs.size(1)+1, token_embs.size(2)), device=device)
+        target_clip_mask = torch.zeros((targets_mask.size(0), targets_mask.size(1)+1), dtype=torch.int64, device=device)
+        target_clip_ids = torch.zeros((targets_ids.size(0), targets_ids.size(1)+1), dtype=torch.int64, device=device)
 
-    embedding_ids = []  # Store indices of caption->CLIP examples
-    captioning_ids = [] # Store indices of CLIP->caption examples
+        embedding_ids = []  # Store indices of caption->CLIP examples
+        captioning_ids = [] # Store indices of CLIP->caption examples
 
-    for c in range(len(caps)):
-        # Retrieval task (caption->CLIP)
-        if clip_pos[c] < 0:
-            embedding_ids.append(c)
+        for c in range(len(caps)):
+            # Retrieval task (caption->CLIP)
+            if clip_pos[c] < 0:
+                embedding_ids.append(c)
 
-            tok_count = torch.sum(targets_mask[c])
-            pos = tok_count - abs(clip_pos[c]) # position of [\CLIP OUT] token, while ignoring variable padding 
+                tok_count = torch.sum(targets_mask[c])
+                pos = tok_count - abs(clip_pos[c]) # position of [\CLIP OUT] token, while ignoring variable padding 
 
-            # Add period token to match placeholder tensor size
-            target_clip_ids[c] = torch.cat(
-                (
-                    targets_ids[c, :pos+1], torch.full((1,), fill_value=13).to(device), targets_ids[c, pos+1:]
-                ), 
-                dim=0
-            )
-            target_clip_mask[c, :tok_count+1] = 1
-
-            with torch.no_grad():
-                input_clip_embs[c] = torch.cat(
+                # Add period token to match placeholder tensor size
+                target_clip_ids[c] = torch.cat(
                     (
-                        token_embs[c, :pos+1], 
-                        model.transformer.wte(torch.tensor([13]).to(device)).reshape(1, -1), 
-                        token_embs[c, pos+1:]
+                        targets_ids[c, :pos+1], 
+                        torch.full((1,), fill_value=13).to(device), 
+                        targets_ids[c, pos+1:]
                     ), 
                     dim=0
                 )
-                
-        else:
-            # Captioning task (CLIP->caption)
-            captioning_ids.append(c)
-            pos = clip_pos[c] # position of [\CLIP IN] token
+                target_clip_mask[c, :tok_count+1] = 1
 
-            input_clip_embs[c] = torch.cat((token_embs[c, :pos], embs[c].reshape(1, -1).to(device), token_embs[c, pos:]), dim=0) # Add input CLIP embedding
-            target_clip_ids[c] = torch.cat((targets_ids[c, :pos], torch.zeros((1,)).to(device), targets_ids[c, pos:]), dim=0)    # Add dummy token; is ignored in loss 
-            target_clip_mask[c] = torch.cat((targets_mask[c, :pos], torch.ones((1,)).to(device), targets_mask[c, pos:]), dim=0)  # Avoid masking new token
+                with torch.no_grad():
+                    input_clip_embs[c] = torch.cat(
+                        (
+                            token_embs[c, :pos+1], 
+                            model.transformer.wte(torch.tensor([13]).to(device)).reshape(1, -1), 
+                            token_embs[c, pos+1:]
+                        ), 
+                        dim=0
+                    )
+                    
+            else:
+                # Captioning task (CLIP->caption)
+                captioning_ids.append(c)
+                pos = clip_pos[c] # position of [\CLIP IN] token
 
-    outputs = model(
-        inputs_embeds=input_clip_embs,
-        return_dict=True,
-        output_hidden_states=True,
-        attention_mask=target_clip_mask
-    )
+                input_clip_embs[c] = torch.cat((token_embs[c, :pos], embs[c].reshape(1, -1).to(device), token_embs[c, pos:]), dim=0) # Add input CLIP embedding
+                target_clip_ids[c] = torch.cat((targets_ids[c, :pos], torch.zeros((1,)).to(device), targets_ids[c, pos:]), dim=0)    # Add dummy token; is ignored in loss 
+                target_clip_mask[c] = torch.cat((targets_mask[c, :pos], torch.ones((1,)).to(device), targets_mask[c, pos:]), dim=0)  # Avoid masking new token
 
-    # Fetch last layer's hidden_state for [\CLIP OUT] tokens
-    last_hiddens = []
-    for idx in embedding_ids:
-        tok_count = torch.sum(targets_mask[idx])                      # Use original position since we concatenated an additional token
-        pos = (tok_count - abs(clip_pos[idx])) - 1                    # Subtract 1 since we shift targets
-        last_hiddens.append(outputs['hidden_states'][-1][idx][pos])
-        
-    caption_to_clip_loss = criterion_ce(outputs['logits'][embedding_ids, :-1].view(-1, outputs['logits'].size(-1)), target_clip_ids[embedding_ids, 1:].view(-1)) \
-                            + criterion_mse(torch.stack(last_hiddens, dim=0).to(device), embs[embedding_ids].to(device))
+        outputs = model(
+            inputs_embeds=input_clip_embs,
+            return_dict=True,
+            output_hidden_states=True,
+            attention_mask=target_clip_mask
+        )
 
-    clip_to_caption_loss = torch.nn.functional.cross_entropy(outputs['logits'][captioning_ids, :-1].reshape(-1, outputs['logits'].size(-1)), targets_ids[captioning_ids].flatten(), ignore_index=0)
+        # Fetch last layer's hidden_state for [\CLIP OUT] tokens
+        last_hiddens = []
+        for idx in embedding_ids:
+            tok_count = torch.sum(targets_mask[idx])                      # Use original position since we concatenated an additional token
+            pos = (tok_count - abs(clip_pos[idx])) - 1                    # Subtract 1 since we shift targets
+            last_hiddens.append(outputs['hidden_states'][-1][idx][pos])
+            
+        caption_to_clip_loss = criterion_ce(outputs['logits'][embedding_ids, :-1].view(-1, outputs['logits'].size(-1)), target_clip_ids[embedding_ids, 1:].view(-1)) \
+                                + criterion_mse(torch.stack(last_hiddens, dim=0).to(device), embs[embedding_ids].to(device))
 
-    loss = caption_to_clip_loss + clip_to_caption_loss
+        clip_to_caption_loss = torch.nn.functional.cross_entropy(
+            outputs['logits'][captioning_ids, :-1].reshape(-1, outputs['logits'].size(-1)), 
+            targets_ids[captioning_ids].flatten(), 
+            ignore_index=0
+        )
+
+        loss = caption_to_clip_loss + clip_to_caption_loss
 
     return loss
 
-def get_model_and_tokenizer(checkpoint: str, device: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+def get_model_and_tokenizer(checkpoint: str, dtype: str, device: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """Loads a pretrained model and tokenizer.
 
     Args:
         checkpoint (str): Path to the checkpoint.
+        dtype (str): Data type to use for the model.
         device (str): Device to load the model on.
 
     Returns:
         Tuple[AutoModelForCausalLM, AutoTokenizer]: Tuple containing the model and tokenizer.
     """
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint, token=os.environ["HF_READ_TOKEN"])
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_special_tokens({"additional_special_tokens": ["[CLIP IN]", "[\CLIP IN]", "[CLIP OUT]", "[\CLIP OUT]"]})
 
-    model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint, 
+        device_map=device, 
+        token=os.environ["HF_READ_TOKEN"],
+        torch_dtype=getattr(torch, dtype)
+    )
     model.resize_token_embeddings(len(tokenizer))
 
     return model, tokenizer
+
+def push_to_hf_hub(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, repo_id: str) -> bool:
+    """Uploads a model and tokenizer to Hugging Face Hub.
+
+    Args:
+        model (AutoModelForCausalLM): The model to upload.
+        tokenizer (AutoTokenizer): The tokenizer to upload.
+        repo_id (str): The repository ID to use for the upload.
+
+    Returns:
+        bool: True if the upload was successful, False otherwise.
+    """
+    try:
+        model.push_to_hub(repo_id, token=os.environ["HF_WRITE_TOKEN"])
+        tokenizer.push_to_hub(repo_id, token=os.environ["HF_WRITE_TOKEN"])
+        return True
+    except Exception as e:
+        print(f"Error uploading to Hugging Face Hub: {str(e)}")
+        return False
