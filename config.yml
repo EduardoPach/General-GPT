@@ -1,0 +1,9 @@
+checkpoint: gpt2
+caption_file: ./annotations/captions_train2017.json
+image_dir: ./train2017/
+coco_embeddings_file: ./coco_embs/coco_train2017_clip_ViT-L-14_embs.npy
+batch_size: 16
+lr:  0.0001
+epochs: 5
+use_amp: false
+dtype: float32
