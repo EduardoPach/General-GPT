@@ -15,13 +15,13 @@ def main(args: argparse.Namespace) -> None:
     args : argparse.Namespace
         Namespace containing arguments passed to the script.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
     model_name = args.model_name
     image_dir = args.image_dir
     output_dir = args.output_dir
     batch_size = args.batch_size
-    filename = f"{output_dir}/coco_{image_dir.split('/')[-1]}_clip_{model_name.replace('/', '-')}_embs.npy"
+    file_output = f"{output_dir}/coco_{image_dir.split('/')[-1]}_clip_{model_name.replace('/', '-')}_embs.npy"
 
     clip_model, preprocess = clip.load(model_name, device=device) # output dim of 768
     clip_model.to(device).eval()
@@ -41,7 +41,7 @@ def main(args: argparse.Namespace) -> None:
         os.makedirs(output_dir)
 
     np.save(
-        filename, 
+        file_output, 
         torch.cat(image_tensors, dim=0).numpy(), 
         allow_pickle=True
     )
