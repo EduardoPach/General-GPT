@@ -195,10 +195,15 @@ def train_lm(
                 target_clip_mask[c, :tok_count+1] = 1
 
                 with torch.no_grad():
+                    if isinstance(model, GPT2LMHeadModel):
+                        period_token = model.transformer.wte(torch.tensor([13]).to(device)).reshape(1, -1)
+                    elif isinstance(model, LlamaForCausalLM):
+                        period_token = model.model.embed_tokens(torch.tensor([13]).to(device)).reshape(1, -1)
+
                     input_clip_embs[c] = torch.cat(
                         (
                             token_embs[c, :pos+1], 
-                            model.transformer.wte(torch.tensor([13]).to(device)).reshape(1, -1), 
+                            period_token, 
                             token_embs[c, pos+1:]
                         ), 
                         dim=0
