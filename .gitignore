@@ -5,3 +5,4 @@ coco_embs
 pycache
 __pycache__
 .vscode
+wandb
