@@ -21,7 +21,7 @@ def main(args: argparse.Namespace) -> None:
     image_dir = args.image_dir
     output_dir = args.output_dir
     batch_size = args.batch_size
-    filename = f"{output_dir}/coco_train2017_clip_{model_name.replace('/', '-')}_embs.npy"
+    filename = f"{output_dir}/coco_{image_dir.split('/')[-1]}_clip_{model_name.replace('/', '-')}_embs.npy"
 
     clip_model, preprocess = clip.load(model_name, device=device) # output dim of 768
     clip_model.to(device).eval()
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Your script description")
 
     parser.add_argument(
-        '--model_name', 
+        '--model-name', 
         type=str, 
         help="Name of the CLIP model to use",
         choices=['RN50',
@@ -63,11 +63,12 @@ if __name__ == "__main__":
             'ViT-B/16',
             'ViT-L/14',
             'ViT-L/14@336px'
-        ]
+        ],
+        default="ViT-L/14"
     )
-    parser.add_argument('--image_dir', type=str, help="Directory containing images", default="./train2017")
-    parser.add_argument('--output_dir', type=str, help="Output directory", default="./coco_embs")
-    parser.add_argument('--batch_size', type=int, help="Batch size", default=512)
+    parser.add_argument('--image-dir', type=str, help="Directory containing images", default="./train2017")
+    parser.add_argument('--output-dir', type=str, help="Output directory", default="./coco_embs")
+    parser.add_argument('--batch-size', type=int, help="Batch size", default=512)
 
     args = parser.parse_args()
 
