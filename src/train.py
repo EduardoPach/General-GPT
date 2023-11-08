@@ -1,5 +1,6 @@
 import argparse
 
+import wandb
 import torch
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -26,8 +27,6 @@ def train_loop(
         num_batches = len(dataloader)
 
         for batch_idx, (caps, _, embs, clip_pos) in  tqdm(enumerate(dataloader), unit=" batch", total=len(dataloader)):
-
-
             loss = utils.train_lm(model, tokenizer, caps, embs, clip_pos, device, use_amp)
 
             scaler.scale(loss).backward()
@@ -36,6 +35,7 @@ def train_loop(
             scheduler.step()
             optimizer.zero_grad()
             
+            wandb.log({"train_loss": loss.item()})
             if batch_idx % 1000 == 0 and batch_idx != 0:
                 print(f"Loss at batch {batch_idx} / {num_batches}  = {loss}")
 
@@ -71,16 +71,17 @@ def main(args: argparse.Namespace) -> None:
         num_training_steps=epochs * len(coco_dataloader)
     )
 
-    train_loop(
-        model, 
-        tokenizer, 
-        optimizer, 
-        scheduler, 
-        coco_dataloader, 
-        device,
-        epochs,
-        use_amp
-    )
+    with wandb.init(project="clip-guided-lm", config=config._asdict(), mode=args.logging_mode) as run:
+        train_loop(
+            model, 
+            tokenizer, 
+            optimizer, 
+            scheduler, 
+            coco_dataloader, 
+            device,
+            epochs,
+            use_amp
+        )
 
     repo_id = f"EduardoPacheco/{config.checkpoint}-clip-guided" 
     response = utils.push_to_hf_hub(model, tokenizer, repo_id)
@@ -153,6 +154,14 @@ if __name__ == "__main__":
         type=str,
         help="Data type to use for the model.",
         default=None
+    )
+
+    parser.add_argument(
+	"--logging-mode",
+	type=str,
+	help="Selects which mode of logging we are at",
+	choices=["online", "offline","disabled"],
+	default="disabled"
     )
 
     args = parser.parse_args()
