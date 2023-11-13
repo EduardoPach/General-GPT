@@ -124,7 +124,7 @@ def prepare_inputs(
     # Generate token embeddings
     token_embs = model.token_embeder(input_ids)
     # Project CLIP embeddings to match token embeddings size
-    clip_embeds = model.clip_projection(clip_embeds)
+    clip_embeds = model.clip_projection_input(clip_embeds)
     
     # Create placeholder tensors to concatenate CLIP embeddings in the case of CLIP->caption
     input_clip_embs = torch.zeros((token_embs.size(0), token_embs.size(1)+1, token_embs.size(2)), device=device)
@@ -209,7 +209,9 @@ def step(
         pos = (tok_count - abs(clip_pos[idx])) - 1
         pred_clip_embeds.append(hidden_states[-1][idx][pos])
     
-    pred_clip_embeds = torch.stack(pred_clip_embeds)
+    if len(pred_clip_embeds) > 0:
+        pred_clip_embeds = torch.stack(pred_clip_embeds)
+        pred_clip_embeds = model.clip_projection_output(pred_clip_embeds)
 
     loss, loss_embedding, loss_caption = loss_fn(
         logits,
