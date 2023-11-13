@@ -74,9 +74,11 @@ class GeneralLLM(GeneralLLMPreTrainedModel):
         self.clip_dim = clip_dim
 
         if self.llm.config.hidden_size != self.clip_dim:
-            self.clip_projection = nn.Linear(self.clip_dim, self.llm.config.hidden_size)
+            self.clip_projection_input = nn.Linear(self.clip_dim, self.llm.config.hidden_size)
+            self.clip_projection_output = nn.Linear(self.llm.config.hidden_size, self.clip_dim)
         else: 
-            self.clip_projection = nn.Identity()
+            self.clip_projection_input = nn.Identity()
+            self.clip_projection_output = nn.Identity()
 
     def token_embeder(self, input_ids: torch.LongTensor) -> torch.Tensor:
         if isinstance(self.llm, GPT2LMHeadModel):
@@ -87,6 +89,23 @@ class GeneralLLM(GeneralLLMPreTrainedModel):
             raise ValueError(f"Expected model to be of type GPT2LMHeadModel or LlamaForCausalLM but got {type(self.llm)}")
         
         return token_embeder(input_ids)
+
+    def freeze_llm(self) -> None:
+        for param in self.llm.parameters():
+            param.requires_grad = False
+
+    def freeze_n_layers(self, n: int) -> None:
+        # only for llama
+        layers_to_freeze = [f"model.layers.{i}" for i in range(n)]
+        for name, param in self.llm.named_parameters():
+            if any(layer in name for layer in layers_to_freeze):
+                param.requires_grad = False
+
+    def freeze_embedding(self) -> None:
+        def _freeze_embedding(module):
+            if isinstance(module, nn.Embedding):
+                module.weight.requires_grad = False
+        self.apply(_freeze_embedding)
 
     def forward(self, **kwargs):
         return self.llm(**kwargs)
@@ -109,6 +128,7 @@ class GeneralLLM(GeneralLLMPreTrainedModel):
                 generated = embed
 
                 for i in range(entry_length):
+                    generated = self.clip_projection_input(generated)
                     outputs = self(inputs_embeds=generated)
 
                     logits = outputs.logits
@@ -150,7 +170,6 @@ class GeneralLLM(GeneralLLMPreTrainedModel):
             input_ids: torch.LongTensor, 
             attention_mask: torch.LongTensor
         ) -> torch.FloatTensor:
-        caption = build_retrieval_input(caption, False)
         outputs = self.llm.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -159,5 +178,7 @@ class GeneralLLM(GeneralLLMPreTrainedModel):
             max_new_tokens=50
         )
 
-        return outputs['hidden_states'][-3][-1][:,-1,:]
+        clip_embed = outputs['hidden_states'][-3][-1][:,-1,:]
+
+        return self.clip_projection_output(clip_embed)
         
