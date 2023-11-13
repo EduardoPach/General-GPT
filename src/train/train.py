@@ -3,6 +3,7 @@ import argparse
 import wandb
 import torch
 from tqdm import tqdm
+import bitsandbytes as bnb
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from transformers.optimization import get_linear_schedule_with_warmup
@@ -52,7 +53,6 @@ def train_loop(
                     loss_fn
                 )
                 
-
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -70,11 +70,14 @@ def main(args: argparse.Namespace) -> None:
     """Main function for training the CLIP-guided language model."""
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
 
-    config = utils.load_config("./config.yml")
+    config = utils.load_config(args.config)
     config = utils.update_named_tuple_from_args(config, args)
 
     llm, tokenizer = utils.get_model_and_tokenizer(config.checkpoint, config.dtype, device)
-    model = GeneralLLM(llm)
+    llm.gradient_checkpointing_enable()
+    model = GeneralLLM(llm).to(device)
+    model.freeze_n_layers(16)
+    model.freeze_embedding()
 
     train_dataloader = get_dataloaders(
         config.train_caption_file,
@@ -92,7 +95,7 @@ def main(args: argparse.Namespace) -> None:
     #     shuffle=False
     # )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
+    optimizer = bnb.optim.Adam8bit(model.parameters(), lr=config.lr)
 
     scheduler = get_linear_schedule_with_warmup(
         optimizer, 
@@ -127,6 +130,13 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to the checkpoint to load the model from."
+    )
+
+    parser.add_argument(
+        '--config', 
+        type=str,
+        default="./config/config_llama2.yml",
+        help="Path to configuration file."
     )
 
     parser.add_argument(
