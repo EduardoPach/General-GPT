@@ -1,9 +1,9 @@
-checkpoint: gpt2
+checkpoint: meta-llama/Llama-2-7b-chat-hf
 train_caption_file: ./annotations/captions_train2017.json
 train_image_dir: ./train2017/
 train_coco_embeddings_file: ./coco_embs/coco_train2017_clip_ViT-L-14_embs.npy
 train_batch_size: 16
 lr:  0.0001
 epochs: 5
-use_amp: false
-dtype: float32
+use_amp: true
+dtype: float16
